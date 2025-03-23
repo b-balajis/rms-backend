@@ -8,6 +8,7 @@ const {
   addStudent,
   createStudentRecords,
   updateStudentRecords,
+  updateSupplyMarks,
   getStudentDetails,
 } = require("../controllers/facultyController");
 
@@ -25,6 +26,12 @@ router.patch(
   "/upload/update-records",
   upload.single("file"),
   updateStudentRecords
+);
+
+router.patch(
+  "/upload/update-supply-records",
+  upload.single("file"),
+  updateSupplyMarks
 );
 
 module.exports = router;

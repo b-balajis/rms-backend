@@ -10,6 +10,7 @@ const createSubject = async (req, res) => {
       department,
       academicRegulation,
       departmentCode,
+      semester,
     } = req.body;
     const existingSubject = await Subject.findOne({ code });
     if (existingSubject)
@@ -22,6 +23,7 @@ const createSubject = async (req, res) => {
       department,
       academicRegulation,
       departmentCode,
+      semester,
     });
     await subject.save();
     res.status(201).json(subject);
@@ -35,21 +37,80 @@ const createSubject = async (req, res) => {
 // Create subjects in bulk by using excel file
 const createSubjects = async (req, res) => {
   try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ message: "No file uploaded" });
-    const subjects = await parseExcelFile(file.path);
-    const existingSubjects = await Subject.find();
-    const newSubjects = subjects.filter((subject) => {
-      const existingSubject = existingSubjects.find(
-        (existingSubject) => existingSubject.code === subject.code
-      );
-      return !existingSubject;
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(sheet);
+
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let errors = [];
+
+    const bulkOps = [];
+
+    for (const row of data) {
+      const {
+        code,
+        name,
+        credits,
+        department,
+        departmentCode,
+        academicRegulation,
+        semester,
+      } = row;
+
+      if (
+        !code ||
+        !name ||
+        !credits ||
+        !department ||
+        !departmentCode ||
+        !academicRegulation ||
+        !semester
+      ) {
+        errors.push({ code: code || "N/A", reason: "Missing required fields" });
+        continue;
+      }
+
+      bulkOps.push({
+        updateOne: {
+          filter: { code },
+          update: {
+            $set: {
+              name,
+              credits,
+              department,
+              departmentCode,
+              academicRegulation,
+              semester,
+            },
+          },
+          upsert: true, // Create if not exists
+        },
+      });
+    }
+
+    if (bulkOps.length > 0) {
+      const result = await Subject.bulkWrite(bulkOps);
+      insertedCount = result.upsertedCount || 0;
+      updatedCount = result.modifiedCount || 0;
+    }
+
+    res.status(200).json({
+      message: "Subjects uploaded successfully",
+      insertedCount,
+      updatedCount,
+      errors,
     });
-    await Subject.insertMany(newSubjects);
-    res.status(201).json({ message: "Subjects created successfully" });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Error creating subjects", error });
+    console.error("Error uploading subjects:", error);
+    res
+      .status(500)
+      .json({ message: "Internal Server Error", error: error.message });
   }
 };
 

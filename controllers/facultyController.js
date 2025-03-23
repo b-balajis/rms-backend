@@ -9,14 +9,349 @@ const Subject = require("../models/subjectsModel");
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
+const parseNumber = (value) => {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    if (["A", "-", "NQ"].includes(value.trim().toUpperCase())) return 0;
+    const num = Number(value);
+    return !isNaN(num) ? num : 0;
+  }
+  return 0;
+};
+
+const convertGpaToPercentage = (gpa) => {
+  if (!gpa || isNaN(gpa)) return 0;
+  return Math.round(gpa * 9.5 * 100) / 100;
+};
+
+// Create Student Records for Semester 1
 const createStudentRecords = async (req, res) => {
   try {
+    let noOfRecordsSaved = 0;
     const file = req.file;
-    const { semester, regulation, batch, type } = req.body;
+    const { semester, regulation, type } = req.body;
+
     const workbook = xlsx.read(file.buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const data = xlsx.utils.sheet_to_json(sheet);
+
+    let missedEntries = [];
+    let duplicateEntries = [];
+
+    // Fetch all required data in bulk
+    const [departments, subjects, existingStudents] = await Promise.all([
+      Department.find().lean(),
+      Subject.find({
+        academicRegulation: regulation.toUpperCase(),
+        semester: semester,
+      }).lean(),
+      Student.find({}, { rollNumber: 1 }).lean(),
+    ]);
+
+    const existingRollNumbers = new Set(
+      existingStudents.map((s) => s.rollNumber)
+    );
+
+    const getDeptSubjAndBatch = (regNo) => {
+      let batch = regNo.startsWith("Y")
+        ? "20" + regNo.substring(1, 3)
+        : regNo.startsWith("L")
+        ? "20" +
+          (parseInt(regNo.substring(1, 3)) - 1).toString().padStart(2, "0")
+        : "Invalid Registration Number";
+
+      const match = regNo.match(/A([A-Z]{2})/);
+      if (!match)
+        return {
+          departmentName: "Unknown Department",
+          subjectsInDepartment: [],
+          batch,
+        };
+
+      const deptCode = match[1];
+      const department = departments.find((dept) => dept.code === deptCode);
+      return {
+        departmentName: department ? department.name : "Unknown Department",
+        subjectsInDepartment: subjects.filter(
+          (subject) => subject.departmentCode === deptCode
+        ),
+        batch,
+      };
+    };
+
+    const students = [];
+
+    for (const row of data) {
+      const rollNumber = row["regdno"];
+      const name = row["name"];
+      const totalCredits = parseNumber(row["tc"]);
+      let activeBacklogs = 0;
+
+      if (!rollNumber || !name || totalCredits === 0) {
+        missedEntries.push({
+          regdno: rollNumber || "N/A",
+          name: name || "N/A",
+          reason: "Invalid data in CSV",
+        });
+        continue;
+      }
+
+      if (existingRollNumbers.has(rollNumber)) {
+        duplicateEntries.push(rollNumber);
+        continue;
+      }
+
+      const { subjectsInDepartment, departmentName, batch } =
+        getDeptSubjAndBatch(rollNumber);
+
+      const subjectsData = subjectsInDepartment.map((subject, i) => {
+        const gradePoints = parseNumber(row[`gp${i + 1}`]);
+        if (gradePoints === 0) activeBacklogs += 1;
+
+        return {
+          subjectName: subject.name,
+          subjectCode: subject.code,
+          externalMarks: parseNumber(row[`e${i + 1}`]),
+          internalMarks: parseNumber(row[`i${i + 1}`]),
+          totalMarks: parseNumber(row[`t${i + 1}`]),
+          credits: parseNumber(row[`cr${i + 1}`]),
+          gradePoints,
+        };
+      });
+
+      students.push({
+        rollNumber,
+        name,
+        department: departmentName,
+        batch,
+        type,
+        semesters: [
+          {
+            semester,
+            subjects: subjectsData,
+            totalCredits,
+            totalGrade: parseNumber(row["tg"]),
+            sgpa: parseNumber(row["sgpa"]),
+            activeBacklogs,
+            totalBacklogs: activeBacklogs,
+          },
+        ],
+        cgpa: parseNumber(row["sgpa"]).toFixed(2),
+        percentage: convertGpaToPercentage(parseNumber(row["sgpa"])),
+        allActiveBacklogs: activeBacklogs,
+        allBacklogs: activeBacklogs,
+      });
+
+      existingRollNumbers.add(rollNumber); // Add to Set to avoid duplicate processing
+      noOfRecordsSaved += 1;
+    }
+
+    if (students.length > 0) {
+      await Student.insertMany(students); // Bulk insert
+    }
+
+    if (noOfRecordsSaved > 0 && duplicateEntries.length === 0) {
+      return res
+        .status(201)
+        .json({ message: "Students created successfully", noOfRecordsSaved });
+    } else if (noOfRecordsSaved > 0 && duplicateEntries.length > 0) {
+      return res.status(207).json({
+        message: "Some duplicates skipped",
+        noOfRecordsSaved,
+        duplicateEntries,
+      });
+    } else if (noOfRecordsSaved === 0 && duplicateEntries.length > 0) {
+      return res
+        .status(409)
+        .json({ message: "No new records inserted", duplicateEntries });
+    } else {
+      return res.status(400).json({ message: "Invalid data in uploaded file" });
+    }
+  } catch (error) {
+    console.error("Error while processing file upload:", error);
+    res
+      .status(500)
+      .json({ message: "Internal Server Error", error: error.message });
+  }
+};
+
+// Update existing student records
+const updateStudentRecords = async (req, res) => {
+  try {
+    let noOfRecordsUpdated = 0;
+    const file = req.file;
+    const { semester, regulation } = req.body;
+    const workbook = xlsx.read(file.buffer, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(sheet);
+
+    let missedEntries = [];
+    let updatedEntries = [];
+    let skippedEntries = [];
+
+    const subjects = await Subject.find({
+      academicRegulation: regulation,
+      semester: semester,
+    }).lean();
+
+    // **Batch fetch student records**
+    const rollNumbers = data.map((row) => row["regdno"]).filter(Boolean);
+    const studentMap = new Map(
+      (await Student.find({ rollNumber: { $in: rollNumbers } })).map((stu) => [
+        stu.rollNumber,
+        stu,
+      ])
+    );
+
+    let bulkUpdates = [];
+
+    for (const row of data) {
+      const rollNumber = row["regdno"];
+      const totalCredits = parseNumber(row["tc"]);
+      let activeBacklogs = 0;
+
+      if (!rollNumber || totalCredits === 0) {
+        missedEntries.push({
+          regdno: rollNumber || "N/A",
+          reason: "Invalid or missing data in the CSV file",
+        });
+        continue;
+      }
+
+      const student = studentMap.get(rollNumber);
+      if (!student) {
+        missedEntries.push({
+          regdno: rollNumber,
+          reason: "Student record not found",
+        });
+        continue;
+      }
+
+      // **Check if semester data already exists**
+      const existingSemester = student.semesters.find(
+        (sem) => sem.semester === semester
+      );
+      if (existingSemester) {
+        skippedEntries.push({
+          regdno: rollNumber,
+          reason: `Semester ${semester} data already exists`,
+        });
+        continue;
+      }
+
+      const subjectsData = subjects.map((subject, i) => {
+        const gradePoints = parseNumber(row[`gp${i + 1}`]);
+
+        if (gradePoints === 0) activeBacklogs += 1;
+
+        return {
+          subjectName: subject.name,
+          subjectCode: subject.code,
+          externalMarks: parseNumber(row[`e${i + 1}`]),
+          internalMarks: parseNumber(row[`i${i + 1}`]),
+          totalMarks: parseNumber(row[`t${i + 1}`]),
+          credits: parseNumber(row[`cr${i + 1}`]),
+          gradePoints: gradePoints,
+        };
+      });
+
+      // Update student record in memory
+      student.semesters.push({
+        semester,
+        subjects: subjectsData,
+        totalCredits,
+        totalGrade: parseNumber(row["tg"]),
+        sgpa: parseNumber(row["sgpa"]),
+        activeBacklogs,
+        totalBacklogs: activeBacklogs,
+      });
+
+      student.allActiveBacklogs = student.semesters.reduce(
+        (sum, sem) => sum + sem.activeBacklogs,
+        0
+      );
+      student.allBacklogs = student.semesters.reduce(
+        (sum, sem) => sum + sem.totalBacklogs,
+        0
+      );
+
+      const totalSGPA = student.semesters.reduce(
+        (sum, sem) => sum + parseNumber(sem.sgpa),
+        0
+      );
+
+      student.cgpa =
+        student.semesters.length > 0
+          ? Number((totalSGPA / student.semesters.length).toFixed(2))
+          : 0;
+
+      student.percentage = convertGpaToPercentage(student.cgpa);
+
+      // Prepare bulk update operation
+      bulkUpdates.push({
+        updateOne: {
+          filter: { rollNumber: student.rollNumber },
+          update: {
+            $set: {
+              semesters: student.semesters,
+              allActiveBacklogs: student.allActiveBacklogs,
+              allBacklogs: student.allBacklogs,
+              cgpa: student.cgpa,
+              percentage: student.percentage,
+            },
+          },
+        },
+      });
+
+      updatedEntries.push(rollNumber);
+      noOfRecordsUpdated += 1;
+    }
+
+    // **Perform bulk update to reduce database writes**
+    if (bulkUpdates.length > 0) {
+      await Student.bulkWrite(bulkUpdates);
+    }
+
+    if (
+      noOfRecordsUpdated > 0 &&
+      missedEntries.length === 0 &&
+      skippedEntries.length === 0
+    ) {
+      return res.status(200).json({
+        message: "Student records updated successfully",
+        noOfRecordsUpdated,
+      });
+    } else {
+      return res.status(207).json({
+        message: "Some records were processed with skipped or missing entries.",
+        noOfRecordsUpdated,
+        missedEntries,
+        skippedEntries,
+      });
+    }
+  } catch (error) {
+    console.error("Error while updating student records:", error);
+    res.status(500).json({
+      message: "Internal Server Error",
+      error: error.message,
+    });
+  }
+};
+
+const updateSupplyMarks = async (req, res) => {
+  try {
+    let noOfRecordsUpdated = 0;
+    const file = req.file;
+    const { semester } = req.body;
+    const workbook = xlsx.read(file.buffer, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(sheet);
+
+    let missedEntries = [];
+    let updatedEntries = [];
 
     const parseNumber = (value) => {
       if (typeof value === "number") return value;
@@ -28,191 +363,159 @@ const createStudentRecords = async (req, res) => {
       return 0;
     };
 
-    const departments = await Department.find().lean();
-    const subjects = await Subject.find({
-      academicRegulation: regulation,
-    }).lean();
+    // **Batch fetch student records**
+    const rollNumbers = data.map((row) => row["regdno"]).filter(Boolean);
+    const studentMap = new Map(
+      (await Student.find({ rollNumber: { $in: rollNumbers } }).lean()).map(
+        (stu) => [stu.rollNumber, stu]
+      )
+    );
 
-    const getDepartment = (code) => {
-      const match = code.match(/A([A-Z]{2})/);
-      if (!match)
-        return {
-          departmentName: "Unknown Department",
-          subjectsInDepartment: [],
-        };
-
-      const deptCode = match[1];
-      const department = departments.find((dept) => dept.code === deptCode);
-      const subjectsInDepartment = subjects.filter(
-        (subject) => subject.departmentCode === deptCode
-      );
-
-      return {
-        departmentName: department ? department.name : "Unknown Department",
-        subjectsInDepartment,
-      };
-    };
-
-    const convertGpaToPercentage = (gpa) => {
-      if (!gpa || isNaN(gpa)) return 0;
-      return Math.round((gpa - 0.5) * 10 * 100) / 100;
-    };
-
-    let missedEntries = []; // Track invalid records
-
-    const students = data
-      .map((row, index) => {
-        const rollNumber = row["regdno"];
-        const name = row["name"];
-        const totalCredits = parseNumber(row["tc"]);
-
-        if (!rollNumber || !name || totalCredits === 0) {
-          missedEntries.push({
-            regdno: rollNumber || "N/A",
-            name: name || "N/A",
-          });
-          return null;
-        }
-
-        const { subjectsInDepartment, departmentName } =
-          getDepartment(rollNumber);
-        const subjects = subjectsInDepartment.map((subject, i) => ({
-          subjectName: subject.name,
-          subjectCode: subject.code,
-          externalMarks: parseNumber(row[`e${i + 1}`]),
-          internalMarks: parseNumber(row[`i${i + 1}`]),
-          totalMarks: parseNumber(row[`t${i + 1}`]),
-          credits: parseNumber(row[`cr${i + 1}`]),
-          gradePoints: parseNumber(row[`gp${i + 1}`]),
-        }));
-
-        return {
-          rollNumber,
-          name,
-          department: departmentName,
-          batch,
-          type,
-          semesters: [
-            {
-              semester,
-              subjects,
-              totalCredits,
-              totalGrade: parseNumber(row["tg"]),
-              sgpa: parseNumber(row["sgpa"]),
-            },
-          ],
-          cgpa: parseNumber(row["sgpa"]).toFixed(2),
-          percentage: convertGpaToPercentage(parseNumber(row["sgpa"])),
-        };
-      })
-      .filter((student) => student !== null); // Remove invalid records
-
-    if (students.length > 0) {
-      await Student.insertMany(students);
-    }
-
-    res.json({
-      message: "Students created and uploaded successfully",
-      missedEntries, // Return the missed entries list
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({
-      message: "Error creating and uploading students data",
-      error: error.message,
-    });
-  }
-};
-
-const updateStudentRecords = async (req, res) => {
-  try {
-    const file = req.file;
-    const { semester } = req.body;
-    const workbook = xlsx.read(file.buffer, { type: "buffer" });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(sheet);
-
-    // Fetch all students in one go to avoid multiple DB queries
-    const studentRollNumbers = data.map((row) => row.regdno);
-    const students = await Student.find({
-      rollNumber: { $in: studentRollNumbers },
-    });
-
-    // Convert student data into a map for quick access
-    const studentMap = new Map(students.map((s) => [s.rollNumber, s]));
-
-    const bulkUpdates = [];
+    let bulkUpdates = [];
 
     for (const row of data) {
-      const { regdno, tc, tg, sgpa, ...marks } = row;
-      const student = studentMap.get(regdno);
+      const rollNumber = row["regdno"];
+      const subjectCode = row["subjectCode"].trim();
+      const newExternalMarks = parseNumber(row["newExternal"]);
+      const newInternalMarks = parseNumber(row["newInternal"]);
+      const newTotalMarks = parseNumber(row["newTotal"]);
+      const newGradePoints = parseNumber(row["newGradePoints"]);
 
-      if (!student) {
-        console.log(`Student not found: ${regdno}`);
+      if (!rollNumber || !subjectCode) {
+        missedEntries.push({
+          regdno: rollNumber || "N/A",
+          subjectCode: subjectCode || "N/A",
+          reason: "Missing roll number or subject code",
+        });
         continue;
       }
 
-      const subjects = [];
-      for (let i = 1; i <= 9; i++) {
-        if (marks[`e${i}`] !== undefined) {
-          subjects.push({
-            externalMarks: isNaN(marks[`e${i}`])
-              ? null
-              : Number(marks[`e${i}`]),
-            internalMarks: isNaN(marks[`i${i}`])
-              ? null
-              : Number(marks[`i${i}`]),
-            totalMarks: isNaN(marks[`t${i}`]) ? null : Number(marks[`t${i}`]),
-            credits: isNaN(marks[`cr${i}`]) ? 0 : Number(marks[`cr${i}`]),
-            gradePoints: isNaN(marks[`gp${i}`]) ? 0 : Number(marks[`gp${i}`]),
-          });
-        }
+      const student = studentMap.get(rollNumber);
+      if (!student) {
+        missedEntries.push({
+          regdno: rollNumber,
+          subjectCode,
+          reason: "Student record not found",
+        });
+        continue;
       }
 
-      // Prepare semester data
-      const newSemester = {
-        semester,
-        subjects,
-        totalCredits: isNaN(tc) ? 0 : Number(tc),
-        totalGrade: isNaN(tg) ? 0 : Number(tg),
-        sgpa: isNaN(sgpa) ? 0 : Number(sgpa),
-      };
+      const semesterData = student.semesters.find(
+        (sem) => sem.semester === semester
+      );
+      if (!semesterData) {
+        missedEntries.push({
+          regdno: rollNumber,
+          subjectCode,
+          reason: `Semester ${semester} not found for student`,
+        });
+        continue;
+      }
 
-      // Calculate new CGPA
-      const allSemesters = [...student.semesters, newSemester];
-      const totalGrades = allSemesters.reduce(
-        (sum, sem) => sum + sem.totalGrade,
+      const subjectEntry = semesterData.subjects.find(
+        (sub) => sub.subjectCode.trim() === subjectCode
+      );
+      if (!subjectEntry) {
+        missedEntries.push({
+          regdno: rollNumber,
+          subjectCode,
+          reason: "Subject not found in student record",
+        });
+        continue;
+      }
+
+      // **Update marks**
+      subjectEntry.externalMarks = newExternalMarks;
+      subjectEntry.internalMarks = newInternalMarks;
+      subjectEntry.totalMarks = newTotalMarks;
+      subjectEntry.gradePoints = newGradePoints;
+
+      // **Recalculate SGPA for the semester**
+      const totalCredits = semesterData.subjects.reduce(
+        (sum, sub) => sum + (sub.credits || 0),
         0
       );
-      const totalCredits = allSemesters.reduce(
-        (sum, sem) => sum + sem.totalCredits,
+      const weightedGradePoints = semesterData.subjects.reduce(
+        (sum, sub) =>
+          sum + (sub.gradePoints > 0 ? sub.credits * sub.gradePoints : 0),
         0
       );
-      const newCGPA =
-        totalCredits > 0 ? (totalGrades / totalCredits).toFixed(2) : 0;
-      const newPercentage = (newCGPA * 9.5).toFixed(2);
 
-      // Add bulk update operation
+      semesterData.totalGrade = semesterData.subjects.reduce(
+        (sum, sub) => sum + (sub.gradePoints || 0),
+        0
+      );
+
+      semesterData.sgpa =
+        totalCredits > 0
+          ? Number((weightedGradePoints / totalCredits).toFixed(2))
+          : 0;
+
+      // **Recalculate Active & Total Backlogs**
+      semesterData.activeBacklogs = semesterData.subjects.filter(
+        (sub) => sub.gradePoints === 0
+      ).length;
+      semesterData.totalBacklogs = semesterData.activeBacklogs;
+
+      student.allActiveBacklogs = student.semesters.reduce(
+        (sum, sem) => sum + sem.activeBacklogs,
+        0
+      );
+      student.allBacklogs = student.semesters.reduce(
+        (sum, sem) => sum + sem.totalBacklogs,
+        0
+      );
+
+      // **Recalculate CGPA and Percentage**
+      const totalSGPA = student.semesters.reduce(
+        (sum, sem) => sum + parseNumber(sem.sgpa),
+        0
+      );
+
+      student.cgpa =
+        student.semesters.length > 0
+          ? Number((totalSGPA / student.semesters.length).toFixed(2))
+          : 0;
+
+      student.percentage = Math.round((student.cgpa - 0.5) * 10 * 100) / 100;
+
+      // **Prepare bulk update**
       bulkUpdates.push({
         updateOne: {
-          filter: { rollNumber: regdno },
+          filter: { rollNumber: student.rollNumber },
           update: {
-            $push: { semesters: newSemester },
-            $set: { cgpa: newCGPA, percentage: newPercentage },
+            $set: {
+              semesters: student.semesters,
+              allActiveBacklogs: student.allActiveBacklogs,
+              allBacklogs: student.allBacklogs,
+              cgpa: student.cgpa,
+              percentage: student.percentage,
+            },
           },
         },
       });
+
+      updatedEntries.push({ regdno: rollNumber, subjectCode });
+      noOfRecordsUpdated += 1;
     }
 
-    // Perform bulk update
+    // **Perform bulk update**
     if (bulkUpdates.length > 0) {
       await Student.bulkWrite(bulkUpdates);
     }
 
-    res.json({ message: "Next semester results uploaded successfully" });
+    return res.status(207).json({
+      message: "Supply marks update process completed",
+      noOfRecordsUpdated,
+      missedEntries,
+      updatedEntries,
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    console.error("Error while updating supply marks:", error);
+    res.status(500).json({
+      message: "Internal Server Error",
+      error: error.message,
+    });
   }
 };
 
@@ -334,5 +637,6 @@ module.exports = {
   getStudents,
   createStudentRecords,
   updateStudentRecords,
+  updateSupplyMarks,
   getStudentDetails,
 };

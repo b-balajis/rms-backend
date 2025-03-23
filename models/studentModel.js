@@ -10,13 +10,26 @@ const subjectSchema = new mongoose.Schema({
   gradePoints: { type: Number },
 });
 
-const semesterSchema = new mongoose.Schema({
-  semester: { type: String, required: true },
-  subjects: { type: [subjectSchema], required: true },
-  totalCredits: { type: Number, required: true },
-  totalGrade: { type: Number, required: true },
-  sgpa: { type: String, required: true },
-});
+const semesterSchema = new mongoose.Schema(
+  {
+    semester: { type: String, required: true },
+    subjects: { type: [subjectSchema], required: true },
+    totalCredits: { type: Number, required: true },
+    totalGrade: { type: Number, required: true },
+    sgpa: { type: String, required: true },
+    activeBacklogs: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
+    totalBacklogs: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
+  },
+  { timestamps: true }
+);
 
 const studentSchema = new mongoose.Schema(
   {
@@ -27,6 +40,16 @@ const studentSchema = new mongoose.Schema(
     type: { type: String, required: true },
     status: { type: String, required: true, default: "Active" },
     semesters: { type: [semesterSchema], default: [] },
+    allActiveBacklogs: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
+    allBacklogs: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
     cgpa: { type: Number, default: 0 },
     percentage: { type: Number, default: 0 },
   },

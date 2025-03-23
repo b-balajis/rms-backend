@@ -13,7 +13,8 @@ const subjectSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    academicRegulation: { type: String, required: true }, // e.g., "R18", "R22" (regulation versions)
+    academicRegulation: { type: String, required: true },
+    semester: { type: Number, required: true },
   },
   { timestamps: true }
 );

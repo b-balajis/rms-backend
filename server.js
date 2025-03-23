@@ -15,6 +15,9 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 
+app.use(express.json({ limit: "50mb" })); // Increase request size limit
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
 // API Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/student", studentRoutes);
