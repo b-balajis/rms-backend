@@ -1,13 +1,9 @@
 const Student = require("../models/studentModel");
-const express = require("express");
-const multer = require("multer");
 const xlsx = require("xlsx");
-const Department = require("../models/departmentModel");
+const { Department } = require("../models/departmentModel");
 const Subject = require("../models/subjectsModel");
 
-// Configure Multer storage
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
+const collegeOfficialMail = "@becbapatla.ac.in";
 
 const parseNumber = (value) => {
   if (typeof value === "number") return value;
@@ -121,11 +117,12 @@ const createStudentRecords = async (req, res) => {
       });
 
       students.push({
-        rollNumber,
+        rollNumber: rollNumber.toUpperCase(),
         name,
+        email: `${rollNumber.toUpperCase()}${collegeOfficialMail}`,
         department: departmentName,
         batch,
-        type,
+        type: rollNumber.charAt(0) === "L" ? "Lateral" : "Regular",
         semesters: [
           {
             semester,
@@ -152,9 +149,10 @@ const createStudentRecords = async (req, res) => {
     }
 
     if (noOfRecordsSaved > 0 && duplicateEntries.length === 0) {
-      return res
-        .status(201)
-        .json({ message: "Students created successfully", noOfRecordsSaved });
+      return res.status(201).json({
+        message: "Student Records created successfully",
+        noOfRecordsSaved,
+      });
     } else if (noOfRecordsSaved > 0 && duplicateEntries.length > 0) {
       return res.status(207).json({
         message: "Some duplicates skipped",
@@ -180,6 +178,7 @@ const createStudentRecords = async (req, res) => {
 const updateStudentRecords = async (req, res) => {
   try {
     let noOfRecordsUpdated = 0;
+    let noOfLateralRecordsCreated = 0; // Track new lateral records
     const file = req.file;
     const { semester, regulation } = req.body;
     const workbook = xlsx.read(file.buffer, { type: "buffer" });
@@ -191,10 +190,15 @@ const updateStudentRecords = async (req, res) => {
     let updatedEntries = [];
     let skippedEntries = [];
 
-    const subjects = await Subject.find({
-      academicRegulation: regulation,
-      semester: semester,
-    }).lean();
+    // Fetch all required data in bulk
+    const [departments, subjects, existingStudents] = await Promise.all([
+      Department.find().lean(),
+      Subject.find({
+        academicRegulation: regulation.toUpperCase(),
+        semester: semester,
+      }).lean(),
+      Student.find({}, { rollNumber: 1 }).lean(),
+    ]);
 
     // **Batch fetch student records**
     const rollNumbers = data.map((row) => row["regdno"]).filter(Boolean);
@@ -206,6 +210,33 @@ const updateStudentRecords = async (req, res) => {
     );
 
     let bulkUpdates = [];
+
+    const getDeptSubjAndBatch = (regNo) => {
+      let batch = regNo.startsWith("Y")
+        ? "20" + regNo.substring(1, 3)
+        : regNo.startsWith("L")
+        ? "20" +
+          (parseInt(regNo.substring(1, 3)) - 1).toString().padStart(2, "0")
+        : "Invalid Registration Number";
+
+      const match = regNo.match(/A([A-Z]{2})/);
+      if (!match)
+        return {
+          departmentName: "Unknown Department",
+          subjectsInDepartment: [],
+          batch,
+        };
+
+      const deptCode = match[1];
+      const department = departments.find((dept) => dept.code === deptCode);
+      return {
+        departmentName: department ? department.name : "Unknown Department",
+        subjectsInDepartment: subjects.filter(
+          (subject) => subject.departmentCode === deptCode
+        ),
+        batch,
+      };
+    };
 
     for (const row of data) {
       const rollNumber = row["regdno"];
@@ -220,7 +251,32 @@ const updateStudentRecords = async (req, res) => {
         continue;
       }
 
-      const student = studentMap.get(rollNumber);
+      let student = studentMap.get(rollNumber);
+
+      // **If the student is Lateral and has no records, create one for Sem-3**
+      if (!student && rollNumber.startsWith("L") && semester === "3") {
+        student = await Student.create({
+          rollNumber: rollNumber.toUpperCase(),
+          name: row["name"],
+          email: `${rollNumber.toUpperCase()}${collegeOfficialMail}`,
+          department: "Unknown", // Update this with actual department logic
+          batch:
+            "20" +
+            (parseInt(rollNumber.substring(1, 3)) - 1)
+              .toString()
+              .padStart(2, "0"),
+          type: "Lateral",
+          semesters: [],
+          cgpa: 0,
+          percentage: 0,
+          allActiveBacklogs: 0,
+          allBacklogs: 0,
+        });
+
+        studentMap.set(rollNumber, student);
+        noOfLateralRecordsCreated += 1;
+      }
+
       if (!student) {
         missedEntries.push({
           regdno: rollNumber,
@@ -241,9 +297,11 @@ const updateStudentRecords = async (req, res) => {
         continue;
       }
 
-      const subjectsData = subjects.map((subject, i) => {
-        const gradePoints = parseNumber(row[`gp${i + 1}`]);
+      const { subjectsInDepartment, departmentName, batch } =
+        getDeptSubjAndBatch(rollNumber);
 
+      const subjectsData = subjectsInDepartment.map((subject, i) => {
+        const gradePoints = parseNumber(row[`gp${i + 1}`]);
         if (gradePoints === 0) activeBacklogs += 1;
 
         return {
@@ -257,7 +315,7 @@ const updateStudentRecords = async (req, res) => {
         };
       });
 
-      // Update student record in memory
+      // **Update student record in memory**
       student.semesters.push({
         semester,
         subjects: subjectsData,
@@ -289,7 +347,7 @@ const updateStudentRecords = async (req, res) => {
 
       student.percentage = convertGpaToPercentage(student.cgpa);
 
-      // Prepare bulk update operation
+      // **Prepare bulk update operation**
       bulkUpdates.push({
         updateOne: {
           filter: { rollNumber: student.rollNumber },
@@ -314,23 +372,13 @@ const updateStudentRecords = async (req, res) => {
       await Student.bulkWrite(bulkUpdates);
     }
 
-    if (
-      noOfRecordsUpdated > 0 &&
-      missedEntries.length === 0 &&
-      skippedEntries.length === 0
-    ) {
-      return res.status(200).json({
-        message: "Student records updated successfully",
-        noOfRecordsUpdated,
-      });
-    } else {
-      return res.status(207).json({
-        message: "Some records were processed with skipped or missing entries.",
-        noOfRecordsUpdated,
-        missedEntries,
-        skippedEntries,
-      });
-    }
+    return res.status(207).json({
+      message: "Student records updated successfully",
+      noOfRecordsUpdated,
+      noOfLateralRecordsCreated,
+      missedEntries,
+      skippedEntries,
+    });
   } catch (error) {
     console.error("Error while updating student records:", error);
     res.status(500).json({

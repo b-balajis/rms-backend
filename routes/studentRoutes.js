@@ -2,6 +2,8 @@ const express = require("express");
 const multer = require("multer");
 const router = express.Router();
 
-const {} = require("../controllers/studentController");
+const { getStudentDetails } = require("../controllers/studentController");
+
+router.get("/get-student-details/:rollNumber", getStudentDetails);
 
 module.exports = router;

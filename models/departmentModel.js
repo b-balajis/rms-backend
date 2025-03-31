@@ -22,6 +22,22 @@ const subjectSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Faculty Model
+const facultySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    designation: { type: String, required: true },
+    department: {
+      type: String,
+      required: true,
+    },
+  },
+  { timestamps: true }
+);
+
+const FacultyModel = mongoose.model("Faculty", facultySchema);
+
 const Department = mongoose.model("Department", departmentSchema);
 
-module.exports = Department;
+module.exports = { Department, FacultyModel };

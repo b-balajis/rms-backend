@@ -1,4 +1,5 @@
 const Subject = require("../models/subjectsModel");
+const xlsx = require("xlsx");
 
 // Create a Subject
 const createSubject = async (req, res) => {
@@ -65,14 +66,26 @@ const createSubjects = async (req, res) => {
 
       if (
         !code ||
-        !name ||
         !credits ||
         !department ||
         !departmentCode ||
         !academicRegulation ||
         !semester
       ) {
-        errors.push({ code: code || "N/A", reason: "Missing required fields" });
+        // instead on single message mention which is not there
+        errors.push({
+          code: code ? code : "Code is missing",
+          name: name ? name : "Name is missing",
+          credits: credits ? credits : "Credits is missing",
+          department: department ? department : "Department is missing",
+          departmentCode: departmentCode
+            ? departmentCode
+            : "Department Code is missing",
+          academicRegulation: academicRegulation
+            ? academicRegulation
+            : "Academic Regulation is missing",
+          semester: semester ? semester : "Semester is missing",
+        });
         continue;
       }
 

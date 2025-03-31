@@ -35,6 +35,7 @@ const studentSchema = new mongoose.Schema(
   {
     rollNumber: { type: String, required: true, unique: true },
     name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
     department: { type: String, required: true },
     batch: { type: String, required: true },
     type: { type: String, required: true },

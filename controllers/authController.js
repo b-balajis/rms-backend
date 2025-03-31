@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const studentModel = require("../models/studentModel");
 
 const loginUser = async (req, res) => {
   try {
@@ -11,6 +12,27 @@ const loginUser = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "All fields are required" });
+    }
+
+    if (role === "student") {
+      const student = await studentModel.findOne({ email });
+      if (!student) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Student not found" });
+      }
+      if (password !== student.rollNumber) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid password" });
+      }
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message: "Student logged in successfully",
+          data: student,
+        });
     }
 
     // Check if user exists
