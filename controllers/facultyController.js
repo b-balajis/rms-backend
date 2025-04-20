@@ -255,11 +255,13 @@ const updateStudentRecords = async (req, res) => {
 
       // **If the student is Lateral and has no records, create one for Sem-3**
       if (!student && rollNumber.startsWith("L") && semester === "3") {
+        const { subjectsInDepartment, departmentName, batch } =
+          getDeptSubjAndBatch(rollNumber);
         student = await Student.create({
           rollNumber: rollNumber.toUpperCase(),
           name: row["name"],
           email: `${rollNumber.toUpperCase()}${collegeOfficialMail}`,
-          department: "Unknown", // Update this with actual department logic
+          department: departmentName,
           batch:
             "20" +
             (parseInt(rollNumber.substring(1, 3)) - 1)
