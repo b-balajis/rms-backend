@@ -41,6 +41,16 @@ const studentSchema = new mongoose.Schema(
     type: { type: String, required: true },
     status: { type: String, required: true, default: "Active" },
     semesters: { type: [semesterSchema], default: [] },
+    overallCredits: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
+    overAllGradeXcredits: {
+      type: Number,
+      default: 0,
+      required: true,
+    },
     allActiveBacklogs: {
       type: Number,
       default: 0,

@@ -81,8 +81,15 @@ const createStudentRecords = async (req, res) => {
     for (const row of data) {
       const rollNumber = row["regdno"];
       const name = row["name"];
-      const totalCredits = parseNumber(row["tc"]);
+      let totalCredits = 0;
       let activeBacklogs = 0;
+
+      // Manually calculate total credits
+      let i = 1;
+      while (row[`cr${i}`]) {
+        totalCredits += parseNumber(row[`cr${i}`]);
+        i++;
+      }
 
       if (!rollNumber || !name || totalCredits === 0) {
         missedEntries.push({
@@ -134,7 +141,9 @@ const createStudentRecords = async (req, res) => {
             totalBacklogs: activeBacklogs,
           },
         ],
-        cgpa: parseNumber(row["sgpa"]).toFixed(2),
+        overallCredits: totalCredits,
+        overAllGradeXcredits: totalCredits * parseNumber(row["sgpa"]),
+        cgpa: Math.floor(parseNumber(row["sgpa"]) * 100) / 100,
         percentage: convertGpaToPercentage(parseNumber(row["sgpa"])),
         allActiveBacklogs: activeBacklogs,
         allBacklogs: activeBacklogs,
@@ -240,10 +249,10 @@ const updateStudentRecords = async (req, res) => {
 
     for (const row of data) {
       const rollNumber = row["regdno"];
-      const totalCredits = parseNumber(row["tc"]);
+      let totalCredits = 0;
       let activeBacklogs = 0;
 
-      if (!rollNumber || totalCredits === 0) {
+      if (!rollNumber) {
         missedEntries.push({
           regdno: rollNumber || "N/A",
           reason: "Invalid or missing data in the CSV file",
@@ -306,13 +315,16 @@ const updateStudentRecords = async (req, res) => {
         const gradePoints = parseNumber(row[`gp${i + 1}`]);
         if (gradePoints === 0) activeBacklogs += 1;
 
+        const credits = parseNumber(row[`cr${i + 1}`]);
+        totalCredits += credits; // Add the credit of each subject
+
         return {
           subjectName: subject.name,
           subjectCode: subject.code,
           externalMarks: parseNumber(row[`e${i + 1}`]),
           internalMarks: parseNumber(row[`i${i + 1}`]),
           totalMarks: parseNumber(row[`t${i + 1}`]),
-          credits: parseNumber(row[`cr${i + 1}`]),
+          credits: credits,
           gradePoints: gradePoints,
         };
       });
@@ -328,6 +340,13 @@ const updateStudentRecords = async (req, res) => {
         totalBacklogs: activeBacklogs,
       });
 
+      const overAllCredits = student.overallCredits + totalCredits;
+      const overAllGradeXcredits =
+        student.overAllGradeXcredits + parseNumber(row["sgpa"]) * totalCredits;
+
+      student.overallCredits = overAllCredits;
+      student.overAllGradeXcredits = overAllGradeXcredits;
+
       student.allActiveBacklogs = student.semesters.reduce(
         (sum, sem) => sum + sem.activeBacklogs,
         0
@@ -337,15 +356,7 @@ const updateStudentRecords = async (req, res) => {
         0
       );
 
-      const totalSGPA = student.semesters.reduce(
-        (sum, sem) => sum + parseNumber(sem.sgpa),
-        0
-      );
-
-      student.cgpa =
-        student.semesters.length > 0
-          ? Number((totalSGPA / student.semesters.length).toFixed(2))
-          : 0;
+      student.cgpa = overAllGradeXcredits / overAllCredits;
 
       student.percentage = convertGpaToPercentage(student.cgpa);
 
@@ -356,6 +367,8 @@ const updateStudentRecords = async (req, res) => {
           update: {
             $set: {
               semesters: student.semesters,
+              overallCredits: student.overallCredits,
+              overAllGradeXcredits: student.overAllGradeXcredits,
               allActiveBacklogs: student.allActiveBacklogs,
               allBacklogs: student.allBacklogs,
               cgpa: student.cgpa,

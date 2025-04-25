@@ -13,7 +13,17 @@ connectDB();
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: "http://localhost:3000", credentials: true }));
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://rms-frontend-chi.vercel.app",
+];
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 
 app.use(express.json({ limit: "50mb" })); // Increase request size limit
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
